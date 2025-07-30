@@ -1,0 +1,288 @@
+name: 'App-CI-CD-$(Date:yyyy.MM.dd)$(Rev:.r)'
+
+parameters:
+  - name: agentPool
+    type: string
+    default: 'self-hosted-pool'
+    displayName: 'Agent Pool Selection'
+    values:
+      - self-hosted-pool
+      - windows-latest
+
+trigger:
+  branches:
+    include:
+      - feature/*
+      - bugfix/*
+      - hotfix/*
+      - develop
+      - main
+      - release/*
+  paths:
+    exclude:
+      - terraform/*
+      - scripts/validate-commit.ps1
+      - scripts/update-build-number.ps1
+      - README.md
+
+variables:
+  - name: isLongLivedBranch
+    value: $[ or(eq(variables['Build.SourceBranch'], 'refs/heads/develop'), eq(variables['Build.SourceBranch'], 'refs/heads/main'), startsWith(variables['Build.SourceBranch'], 'refs/heads/release/')) ]
+  - name: buildConfiguration
+    value: 'Release'
+  - name: dotNetFramework
+    value: 'netcoreapp2.1'
+  - name: dotNetVersion
+    value: '2.1.x'
+  - name: targetRuntime
+    value: 'win-x86'
+  - name: ASPNETCORE_ENVIRONMENT
+    value: 'Production'
+
+stages:
+# ==========================================
+# BUILD STAGE - Build .NET Application
+# ==========================================
+- stage: Build
+  displayName: 'Build Application'
+  jobs:
+  - job: BuildJob
+    displayName: 'Build .NET Core Application'
+    pool: ${{ parameters.agentPool }}
+    steps:
+    - task: UseDotNet@2
+      displayName: 'Use .NET Core SDK $(dotNetVersion)'
+      inputs:
+        packageType: 'sdk'
+        version: '$(dotNetVersion)'
+        installationPath: $(Agent.ToolsDirectory)/dotnet
+
+    - task: PowerShell@2
+      displayName: 'Validate Commit Message'
+      inputs:
+        targetType: 'filePath'
+        filePath: 'scripts/validate-commit.ps1'
+        arguments: '-CommitMessage "$(Build.SourceVersionMessage)"'
+      condition: and(succeeded(), ne(variables['Build.SourceVersionMessage'], ''))
+
+    - task: PowerShell@2
+      displayName: 'Update Build Number'
+      inputs:
+        targetType: 'filePath'
+        filePath: 'scripts/update-build-number-app.ps1'
+        arguments: '-BuildId $(Build.BuildId)'
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Restore NuGet Packages'
+      inputs:
+        command: 'restore'
+        projects: '**/*.csproj'
+        feedsToUse: 'select'
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Build Application'
+      inputs:
+        command: 'build'
+        projects: '**/*.csproj'
+        arguments: '--configuration $(buildConfiguration) --no-restore'
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Run Unit Tests'
+      inputs:
+        command: 'test'
+        projects: '**/*Tests/*.csproj'
+        arguments: '--configuration $(buildConfiguration) --no-build --collect:"XPlat Code Coverage" --logger trx --results-directory $(Common.TestResultsDirectory)'
+      continueOnError: false
+      condition: succeeded()
+
+    - task: PublishTestResults@2
+      displayName: 'Publish Test Results'
+      inputs:
+        testResultsFormat: 'VSTest'
+        testResultsFiles: '**/*.trx'
+        searchFolder: '$(Common.TestResultsDirectory)'
+        publishRunAttachments: true
+      condition: always()
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Prepare Database Migration Script'
+      inputs:
+        command: 'custom'
+        custom: 'ef'
+        arguments: 'migrations script -p DotNetCoreSqlDb.csproj -o $(Build.ArtifactStagingDirectory)/migration-script.sql -i'
+        workingDirectory: '$(System.DefaultWorkingDirectory)'
+      condition: and(succeeded(), eq(variables.isLongLivedBranch, 'true'))
+
+    - task: DotNetCoreCLI@2
+      displayName: 'Publish Application'
+      inputs:
+        command: 'publish'
+        publishWebProjects: true
+        arguments: '--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)/app --no-build'
+        zipAfterPublish: false
+      condition: and(succeeded(), eq(variables.isLongLivedBranch, 'true'))
+
+    - task: ArchiveFiles@2
+      displayName: 'Archive Application Files'
+      inputs:
+        rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/app'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/app.$(Build.BuildNumber).zip'
+        replaceExistingArchive: true
+      condition: and(succeeded(), eq(variables.isLongLivedBranch, 'true'))
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Application Artifact'
+      inputs:
+        pathToPublish: '$(Build.ArtifactStagingDirectory)/app.$(Build.BuildNumber).zip'
+        artifactName: 'application'
+        publishLocation: 'Container'
+      condition: and(succeeded(), eq(variables.isLongLivedBranch, 'true'))
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Database Migration Script'
+      inputs:
+        pathToPublish: '$(Build.ArtifactStagingDirectory)/migration-script.sql'
+        artifactName: 'database-migration'
+        publishLocation: 'Container'
+      condition: and(succeeded(), eq(variables.isLongLivedBranch, 'true'))
+
+# ==========================================
+# DEPLOY TO STAGING SLOT
+# ==========================================
+- stage: Deploy_Staging
+  displayName: 'Deploy to Staging Slot'
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables.isLongLivedBranch, 'true'))
+  jobs:
+  - deployment: DeployToStaging
+    displayName: 'Deploy Application to Staging Slot'
+    environment: PROD-STAGING
+    pool: ${{ parameters.agentPool }}
+    variables:
+      - group: prod-variables
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: DownloadBuildArtifacts@1
+            displayName: 'Download Application Artifacts'
+            inputs:
+              artifactName: 'application'
+              downloadPath: '$(Pipeline.Workspace)'
+
+          - task: DownloadBuildArtifacts@1
+            displayName: 'Download Database Migration Artifacts'
+            inputs:
+              artifactName: 'database-migration'
+              downloadPath: '$(Pipeline.Workspace)'
+
+          - task: ExtractFiles@1
+            displayName: 'Extract Application Files'
+            inputs:
+              archiveFilePatterns: '$(Pipeline.Workspace)/application/app.$(Build.BuildNumber).zip'
+              destinationFolder: '$(Pipeline.Workspace)/extracted-app'
+
+          - task: SqlAzureDacpacDeployment@1
+            displayName: 'Update Database Schema'
+            inputs:
+              azureSubscription: 'azure-subscription'
+              authenticationType: 'servicePrincipal'
+              serverName: 'sql-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod.database.windows.net'
+              databaseName: 'sqldb-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod'
+              deployType: 'SqlTask'
+              sqlFile: '$(Pipeline.Workspace)/database-migration/migration-script.sql'
+              sqlUsername: '$(SQL_SERVER_ADMINISTRATOR_LOGIN)'
+              sqlPassword: '$(SQL_SERVER_ADMINISTRATOR_PASSWORD)'
+
+          - task: AzureWebApp@1
+            displayName: 'Deploy to Staging Slot'
+            inputs:
+              azureSubscription: 'azure-subscription'
+              appName: 'app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod'
+              deployToSlotOrASE: true
+              resourceGroupName: 'rg-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod'
+              slotName: 'staging'
+              package: '$(Pipeline.Workspace)/extracted-app'
+              appSettings: |
+                -ASPNETCORE_ENVIRONMENT $(ASPNETCORE_ENVIRONMENT)
+                -Version $(Build.BuildNumber)
+
+          - task: PowerShell@2
+            displayName: 'Display Deployment URLs'
+            inputs:
+              targetType: 'inline'
+              script: |
+                $prodUrl = "https://app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod.azurewebsites.net"
+                $stagingUrl = "https://app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod-staging.azurewebsites.net"
+                
+                Write-Host "✅ Application deployed to staging slot successfully!" -ForegroundColor Green
+                Write-Host ""
+                Write-Host "🔵 Production URL: $prodUrl" -ForegroundColor Blue
+                Write-Host "🟢 Staging URL: $stagingUrl" -ForegroundColor Green
+                Write-Host ""
+                Write-Host "📋 Next step: Review staging deployment, then proceed to slot swap" -ForegroundColor Yellow
+
+# ==========================================
+# SWAP PRODUCTION SLOTS
+# ==========================================
+- stage: Swap_Slots
+  displayName: 'Swap Production Slots'
+  dependsOn: Deploy_Staging
+  condition: and(succeeded(), eq(variables.isLongLivedBranch, 'true'))
+  jobs:
+  - deployment: SwapSlots
+    displayName: 'Swap Staging to Production'
+    environment: PROD-SWAP
+    pool: ${{ parameters.agentPool }}
+    variables:
+      - group: prod-variables
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureAppServiceManage@0
+            displayName: 'Swap Staging to Production'
+            inputs:
+              azureSubscription: 'azure-subscription'
+              action: 'Swap Slots'
+              webAppName: 'app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod'
+              resourceGroupName: 'rg-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod'
+              sourceSlot: 'staging'
+              targetSlot: 'production'
+
+          - task: PowerShell@2
+            displayName: 'Verify Deployment and Display URLs'
+            inputs:
+              targetType: 'inline'
+              script: |
+                $prodUrl = "https://app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod.azurewebsites.net"
+                $stagingUrl = "https://app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod-staging.azurewebsites.net"
+                
+                Write-Host "🔄 Slot swap completed successfully!" -ForegroundColor Green
+                Write-Host ""
+                Write-Host "🎯 Final Deployment URLs:" -ForegroundColor Cyan
+                Write-Host "🔵 Production URL: $prodUrl" -ForegroundColor Blue
+                Write-Host "🟢 Staging URL: $stagingUrl" -ForegroundColor Green
+                Write-Host ""
+                
+                # Basic health check
+                try {
+                    Write-Host "🔍 Performing health check on production..." -ForegroundColor Yellow
+                    $response = Invoke-WebRequest -Uri $prodUrl -Method GET -TimeoutSec 30 -UseBasicParsing
+                    if ($response.StatusCode -eq 200) {
+                        Write-Host "✅ Production deployment verified successfully!" -ForegroundColor Green
+                        Write-Host "📊 Status Code: $($response.StatusCode)" -ForegroundColor Green
+                    } else {
+                        Write-Host "⚠️ Production returned status: $($response.StatusCode)" -ForegroundColor Yellow
+                    }
+                } catch {
+                    Write-Host "❌ Failed to verify production deployment: $($_.Exception.Message)" -ForegroundColor Red
+                    Write-Host "🔧 Please manually verify the deployment using the URLs above" -ForegroundColor Yellow
+                }
+                
+                Write-Host ""
+                Write-Host "📝 Share these URLs with your trainer:" -ForegroundColor Magenta
+                Write-Host "   Production: $prodUrl" -ForegroundColor White
+                Write-Host "   Staging: $stagingUrl" -ForegroundColor White

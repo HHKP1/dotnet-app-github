@@ -1,20 +1,22 @@
-# Introduction 
-TODO: Give a short introduction of your project. Let this section explain the objectives or the motivation behind this project. 
+---
+topic: .NET Core MVC sample for Azure App Service
+languages:
+  - aspx-csharp
+products:
+  - Azure App Service
+  - Azure Web Apps
+---
 
-# Getting Started
-TODO: Guide users through getting your code up and running on their own system. In this section you can talk about:
-1.	Installation process
-2.	Software dependencies
-3.	Latest releases
-4.	API references
+# .NET Core MVC sample for Azure App Service
 
-# Build and Test
-TODO: Describe and show how to build your code and run the tests. 
+This is a sample application that you can use to follow along with the tutorial at 
+[Build a .NET Core and SQL Database web app in Azure Web Apps for Containers](https://docs.microsoft.com/azure/app-service/containers/tutorial-dotnetcore-sqldb-app). 
 
-# Contribute
-TODO: Explain how other users and developers can contribute to make your code better. 
+## License
 
-If you want to learn more about creating good readme files then refer the following [guidelines](https://docs.microsoft.com/en-us/azure/devops/repos/git/create-a-readme?view=azure-devops). You can also seek inspiration from the below readme files:
-- [ASP.NET Core](https://github.com/aspnet/Home)
-- [Visual Studio Code](https://github.com/Microsoft/vscode)
-- [Chakra Core](https://github.com/Microsoft/ChakraCore)
+See [LICENSE](LICENSE.md).
+
+## Contributing
+
+This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/). For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
+  

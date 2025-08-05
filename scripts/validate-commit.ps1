@@ -3,6 +3,23 @@ param(
     [string]$CommitMessage
 )
 
+# Allow Azure DevOps merge commit messages (these are generated automatically)
+if ($CommitMessage -match "^Merge pull request \d+ from .* into .*$" -or
+    $CommitMessage -match "^Merged PR \d+:.*$") {
+    Write-Host "⚠️  Allowing Azure DevOps merge commit message." -ForegroundColor Yellow
+    Write-Host "Message: $CommitMessage" -ForegroundColor Cyan
+    exit 0
+}
+
+# Allow initial repository setup commits
+if ($CommitMessage -eq "Initial commit" -or 
+    $CommitMessage -eq "Initialize repository" -or
+    $CommitMessage -match "^INIT-\d+ .*$") {
+    Write-Host "⚠️  Allowing repository initialization commit." -ForegroundColor Yellow
+    Write-Host "Message: $CommitMessage" -ForegroundColor Cyan
+    exit 0
+}
+
 # Project code pattern - should start with project code and work item number
 $pattern = "^[A-Z]+-\d+\s+.+"
 

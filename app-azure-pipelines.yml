@@ -8,6 +8,7 @@ parameters:
     values:
       - self-hosted-pool
       - windows-latest
+      - ubuntu-latest
 
 trigger:
   branches:
@@ -21,11 +22,11 @@ trigger:
   paths:
     exclude:
       - terraform/*
-      - scripts/validate-commit.ps1
-      - scripts/update-build-number.ps1
       - README.md
+      - '*.md'
 
 variables:
+  - group: prod-variables
   - name: isLongLivedBranch
     value: $[ or(eq(variables['Build.SourceBranch'], 'refs/heads/develop'), eq(variables['Build.SourceBranch'], 'refs/heads/main'), startsWith(variables['Build.SourceBranch'], 'refs/heads/release/')) ]
   - name: buildConfiguration
@@ -34,10 +35,10 @@ variables:
     value: 'netcoreapp2.1'
   - name: dotNetVersion
     value: '2.1.x'
-  - name: targetRuntime
-    value: 'win-x86'
   - name: ASPNETCORE_ENVIRONMENT
     value: 'Production'
+  - name: versionNumber
+    value: $[ coalesce(replace(replace(variables['Build.SourceBranch'], 'refs/heads/release/', ''), 'refs/heads/', ''), '1.0.0') ]
 
 stages:
 # ==========================================
@@ -48,7 +49,11 @@ stages:
   jobs:
   - job: BuildJob
     displayName: 'Build .NET Core Application'
-    pool: ${{ parameters.agentPool }}
+    pool: 
+      ${{ if eq(parameters.agentPool, 'self-hosted-pool') }}:
+        name: ${{ parameters.agentPool }}
+      ${{ else }}:
+        vmImage: ${{ parameters.agentPool }}
     steps:
     - task: UseDotNet@2
       displayName: 'Use .NET Core SDK $(dotNetVersion)'
@@ -57,20 +62,39 @@ stages:
         version: '$(dotNetVersion)'
         installationPath: $(Agent.ToolsDirectory)/dotnet
 
+    # Cross-platform script for commit validation
     - task: PowerShell@2
-      displayName: 'Validate Commit Message'
+      displayName: 'Validate Commit Message (Windows)'
       inputs:
         targetType: 'filePath'
         filePath: 'scripts/validate-commit.ps1'
         arguments: '-CommitMessage "$(Build.SourceVersionMessage)"'
-      condition: and(succeeded(), ne(variables['Build.SourceVersionMessage'], ''))
+      condition: and(succeeded(), ne(variables['Build.SourceVersionMessage'], ''), eq(variables['Agent.OS'], 'Windows_NT'))
 
+    - task: Bash@3
+      displayName: 'Validate Commit Message (Linux)'
+      inputs:
+        targetType: 'filePath'
+        filePath: 'scripts/validate-commit.sh'
+        arguments: '"$(Build.SourceVersionMessage)"'
+      condition: and(succeeded(), ne(variables['Build.SourceVersionMessage'], ''), eq(variables['Agent.OS'], 'Linux'))
+
+    # Cross-platform build number update
     - task: PowerShell@2
-      displayName: 'Update Build Number'
+      displayName: 'Update Build Number (Windows)'
       inputs:
         targetType: 'filePath'
         filePath: 'scripts/update-build-number-app.ps1'
         arguments: '-BuildId $(Build.BuildId)'
+      condition: eq(variables['Agent.OS'], 'Windows_NT')
+
+    - task: Bash@3
+      displayName: 'Update Build Number (Linux)'
+      inputs:
+        targetType: 'filePath'
+        filePath: 'scripts/update-build-number-app.sh'
+        arguments: '$(Build.BuildId)'
+      condition: eq(variables['Agent.OS'], 'Linux')
 
     - task: DotNetCoreCLI@2
       displayName: 'Restore NuGet Packages'
@@ -104,8 +128,16 @@ stages:
         publishRunAttachments: true
       condition: always()
 
+    - task: PublishCodeCoverageResults@1
+      displayName: 'Publish Code Coverage'
+      inputs:
+        codeCoverageTool: 'Cobertura'
+        summaryFileLocation: '$(Common.TestResultsDirectory)/**/coverage.cobertura.xml'
+      condition: always()
+
+    # Cross-platform EF migrations script generation
     - task: DotNetCoreCLI@2
-      displayName: 'Prepare Database Migration Script'
+      displayName: 'Generate Database Migration Script'
       inputs:
         command: 'custom'
         custom: 'ef'
@@ -159,7 +191,11 @@ stages:
   - deployment: DeployToStaging
     displayName: 'Deploy Application to Staging Slot'
     environment: PROD-STAGING
-    pool: ${{ parameters.agentPool }}
+    pool: 
+      ${{ if eq(parameters.agentPool, 'self-hosted-pool') }}:
+        name: ${{ parameters.agentPool }}
+      ${{ else }}:
+        vmImage: ${{ parameters.agentPool }}
     variables:
       - group: prod-variables
     strategy:
@@ -184,6 +220,7 @@ stages:
               archiveFilePatterns: '$(Pipeline.Workspace)/application/app.$(Build.BuildNumber).zip'
               destinationFolder: '$(Pipeline.Workspace)/extracted-app'
 
+          # Cross-platform database update
           - task: SqlAzureDacpacDeployment@1
             displayName: 'Update Database Schema'
             inputs:
@@ -207,10 +244,11 @@ stages:
               package: '$(Pipeline.Workspace)/extracted-app'
               appSettings: |
                 -ASPNETCORE_ENVIRONMENT $(ASPNETCORE_ENVIRONMENT)
-                -Version $(Build.BuildNumber)
+                -Version $(versionNumber)
 
+          # Cross-platform verification script
           - task: PowerShell@2
-            displayName: 'Display Deployment URLs'
+            displayName: 'Display Deployment URLs (Windows)'
             inputs:
               targetType: 'inline'
               script: |
@@ -223,6 +261,23 @@ stages:
                 Write-Host "🟢 Staging URL: $stagingUrl" -ForegroundColor Green
                 Write-Host ""
                 Write-Host "📋 Next step: Review staging deployment, then proceed to slot swap" -ForegroundColor Yellow
+            condition: eq(variables['Agent.OS'], 'Windows_NT')
+
+          - task: Bash@3
+            displayName: 'Display Deployment URLs (Linux)'
+            inputs:
+              targetType: 'inline'
+              script: |
+                prodUrl="https://app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod.azurewebsites.net"
+                stagingUrl="https://app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod-staging.azurewebsites.net"
+                
+                echo "✅ Application deployed to staging slot successfully!"
+                echo ""
+                echo "🔵 Production URL: $prodUrl"
+                echo "🟢 Staging URL: $stagingUrl"
+                echo ""
+                echo "📋 Next step: Review staging deployment, then proceed to slot swap"
+            condition: eq(variables['Agent.OS'], 'Linux')
 
 # ==========================================
 # SWAP PRODUCTION SLOTS
@@ -235,7 +290,11 @@ stages:
   - deployment: SwapSlots
     displayName: 'Swap Staging to Production'
     environment: PROD-SWAP
-    pool: ${{ parameters.agentPool }}
+    pool: 
+      ${{ if eq(parameters.agentPool, 'self-hosted-pool') }}:
+        name: ${{ parameters.agentPool }}
+      ${{ else }}:
+        vmImage: ${{ parameters.agentPool }}
     variables:
       - group: prod-variables
     strategy:
@@ -252,8 +311,9 @@ stages:
               sourceSlot: 'staging'
               targetSlot: 'production'
 
+          # Cross-platform verification
           - task: PowerShell@2
-            displayName: 'Verify Deployment and Display URLs'
+            displayName: 'Verify Deployment and Display URLs (Windows)'
             inputs:
               targetType: 'inline'
               script: |
@@ -286,3 +346,33 @@ stages:
                 Write-Host "📝 Share these URLs with your trainer:" -ForegroundColor Magenta
                 Write-Host "   Production: $prodUrl" -ForegroundColor White
                 Write-Host "   Staging: $stagingUrl" -ForegroundColor White
+            condition: eq(variables['Agent.OS'], 'Windows_NT')
+
+          - task: Bash@3
+            displayName: 'Verify Deployment and Display URLs (Linux)'
+            inputs:
+              targetType: 'inline'
+              script: |
+                prodUrl="https://app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod.azurewebsites.net"
+                stagingUrl="https://app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod-staging.azurewebsites.net"
+                
+                echo "🔄 Slot swap completed successfully!"
+                echo ""
+                echo "🎯 Final Deployment URLs:"
+                echo "🔵 Production URL: $prodUrl"
+                echo "🟢 Staging URL: $stagingUrl"
+                echo ""
+                
+                # Basic health check
+                echo "🔍 Performing health check on production..."
+                if curl -f -s -o /dev/null -w "%{http_code}" "$prodUrl" | grep -q "200"; then
+                    echo "✅ Production deployment verified successfully!"
+                else
+                    echo "⚠️ Production health check failed - please verify manually"
+                fi
+                
+                echo ""
+                echo "📝 Share these URLs with your trainer:"
+                echo "   Production: $prodUrl"
+                echo "   Staging: $stagingUrl"
+            condition: eq(variables['Agent.OS'], 'Linux')

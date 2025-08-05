@@ -141,7 +141,7 @@ stages:
       inputs:
         command: 'custom'
         custom: 'ef'
-        arguments: 'migrations script -p DotNetCoreSqlDb.csproj -o $(Build.ArtifactStagingDirectory)/migration-script.sql -i -- --Connection "Server=tcp:sql-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod.database.windows.net,1433;Initial Catalog=sqldb-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod;Persist Security Info=False;User ID=$(SQL_SERVER_ADMINISTRATOR_LOGIN);Password=$(SQL_SERVER_ADMINISTRATOR_PASSWORD);MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;"'
+        arguments: 'migrations script -p DotNetCoreSqlDb.csproj -o $(Build.ArtifactStagingDirectory)/migration-script.sql -i --Connection "Server=tcp:sql-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod.database.windows.net,1433;Initial Catalog=sqldb-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod;Persist Security Info=False;User ID=$(SQL_SERVER_ADMINISTRATOR_LOGIN);Password=$(SQL_SERVER_ADMINISTRATOR_PASSWORD);MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;"'
         workingDirectory: '$(System.DefaultWorkingDirectory)'
       condition: and(succeeded(), eq(variables.isLongLivedBranch, 'true'))
 

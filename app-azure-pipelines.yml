@@ -244,10 +244,8 @@ stages:
               resourceGroupName: 'rg-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod'
               slotName: 'staging'
               package: '$(Pipeline.Workspace)/extracted-app'
-              appSettings: |
-                -ASPNETCORE_ENVIRONMENT $(ASPNETCORE_ENVIRONMENT)
-                -Version $(Build.BuildNumber)
-
+              appSettings: '-ASPNETCORE_ENVIRONMENT $(ASPNETCORE_ENVIRONMENT) -Version $(Build.BuildNumber)'
+              
           # Cross-platform verification script
           - task: PowerShell@2
             displayName: 'Display Deployment URLs (Windows)'

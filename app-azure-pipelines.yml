@@ -245,7 +245,8 @@ stages:
               slotName: 'staging'
               package: '$(Pipeline.Workspace)/extracted-app'
               appSettings: |
-                ASPNETCORE_ENVIRONMENT=$(ASPNETCORE_ENVIRONMENT) Version=$(Build.BuildNumber)
+                ASPNETCORE_ENVIRONMENT=$(ASPNETCORE_ENVIRONMENT)
+                Version=$(Build.BuildNumber)
 
           # Cross-platform verification script
           - task: PowerShell@2

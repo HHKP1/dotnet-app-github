@@ -7,8 +7,8 @@ try {
     # Get current date and format
     $date = Get-Date -Format "yyyy.MM.dd"
     
-    # Create new build number with format App-CI-CD-{yyyy.MM.dd.rev}
-    $newBuildNumber = "App-CI-CD-$date.$BuildId"
+    # Create new build number with format Infra-CI-CD-{yyyy.MM.dd.rev}
+    $newBuildNumber = "Infra-CI-CD-$date.$BuildId"
     
     # Store old build number for artifact naming
     Write-Host "##vso[task.setvariable variable=oldBuildNumber]$env:BUILD_BUILDNUMBER"

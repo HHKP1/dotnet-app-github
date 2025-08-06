@@ -244,7 +244,7 @@ stages:
               resourceGroupName: 'rg-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod'
               slotName: 'staging'
               package: '$(Pipeline.Workspace)/extracted-app'
-              appSettings: |-
+              appSettings: |
                 ASPNETCORE_ENVIRONMENT=$(ASPNETCORE_ENVIRONMENT) Version=$(Build.BuildNumber)
 
           # Cross-platform verification script

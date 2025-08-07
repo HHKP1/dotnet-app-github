@@ -246,7 +246,7 @@ stages:
               package: '$(Pipeline.Workspace)/extracted-app'
               appSettings: '-ASPNETCORE_ENVIRONMENT $(ASPNETCORE_ENVIRONMENT) -Version $(Build.BuildNumber)'
               
-          # Cross-platform verification script
+          # Cross-platform verification script #
           - task: PowerShell@2
             displayName: 'Display Deployment URLs (Windows)'
             inputs:

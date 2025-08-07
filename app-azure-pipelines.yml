@@ -156,6 +156,15 @@ stages:
         zipAfterPublish: false
       condition: and(succeeded(), eq(variables.isLongLivedBranch, 'true'))
 
+    - task: PowerShell@2
+      displayName: 'Verify Publish Output'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "Listing files in $(Build.ArtifactStagingDirectory)/app"
+          Get-ChildItem -Path "$(Build.ArtifactStagingDirectory)/app" -Recurse
+      condition: and(succeeded(), eq(variables.isLongLivedBranch, 'true'))
+
     - task: ArchiveFiles@2
       displayName: 'Archive Application Files'
       inputs:
@@ -221,8 +230,17 @@ stages:
             inputs:
               archiveFilePatterns: '$(Pipeline.Workspace)/application/app.$(Build.BuildNumber).zip'
               destinationFolder: '$(Pipeline.Workspace)/extracted-app'
+              cleanDestinationFolder: true
 
-          # Cross-platform database update
+          - task: PowerShell@2
+            displayName: 'Verify Extracted Files'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "Listing files in $(Pipeline.Workspace)/extracted-app"
+                Get-ChildItem -Path "$(Pipeline.Workspace)/extracted-app" -Recurse
+            condition: succeeded()
+
           - task: SqlAzureDacpacDeployment@1
             displayName: 'Update Database Schema'
             inputs:
@@ -244,9 +262,13 @@ stages:
               resourceGroupName: 'rg-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod'
               slotName: 'staging'
               package: '$(Pipeline.Workspace)/extracted-app'
-              appSettings: '-ASPNETCORE_ENVIRONMENT $(ASPNETCORE_ENVIRONMENT) -Version $(Build.BuildNumber)'
-              
-          # Cross-platform verification script #
+              appSettings: |
+                -ASPNETCORE_ENVIRONMENT $(ASPNETCORE_ENVIRONMENT)
+                -Version $(versionNumber)
+            env:
+              SYSTEM_DEBUG: true
+
+          # Cross-platform verification script
           - task: PowerShell@2
             displayName: 'Display Deployment URLs (Windows)'
             inputs:

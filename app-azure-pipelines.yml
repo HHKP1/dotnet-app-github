@@ -151,9 +151,20 @@ stages:
       displayName: 'Publish Application'
       inputs:
         command: 'publish'
-        publishWebProjects: true
+        publishWebProjects: false
+        projects: 'DotNetCoreSqlDb.csproj'
         arguments: '--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)/app --no-build'
+        modifyOutputPath: false
         zipAfterPublish: false
+      condition: and(succeeded(), eq(variables.isLongLivedBranch, 'true'))
+
+    - task: PowerShell@2
+      displayName: 'Verify Publish Output'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "Listing files in $(Build.ArtifactStagingDirectory)/app"
+          Get-ChildItem -Path "$(Build.ArtifactStagingDirectory)/app" -Recurse
       condition: and(succeeded(), eq(variables.isLongLivedBranch, 'true'))
 
     - task: ArchiveFiles@2
@@ -221,8 +232,17 @@ stages:
             inputs:
               archiveFilePatterns: '$(Pipeline.Workspace)/application/app.$(Build.BuildNumber).zip'
               destinationFolder: '$(Pipeline.Workspace)/extracted-app'
+              cleanDestinationFolder: true
 
-          # Cross-platform database update
+          - task: PowerShell@2
+            displayName: 'Verify Extracted Files'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "Listing files in $(Pipeline.Workspace)/extracted-app"
+                Get-ChildItem -Path "$(Pipeline.Workspace)/extracted-app" -Recurse
+            condition: succeeded()
+
           - task: SqlAzureDacpacDeployment@1
             displayName: 'Update Database Schema'
             inputs:
@@ -245,7 +265,9 @@ stages:
               slotName: 'staging'
               package: '$(Pipeline.Workspace)/extracted-app'
               appSettings: '-ASPNETCORE_ENVIRONMENT $(ASPNETCORE_ENVIRONMENT) -Version $(Build.BuildNumber)'
-              
+            env:
+              SYSTEM_DEBUG: true
+
           # Cross-platform verification script
           - task: PowerShell@2
             displayName: 'Display Deployment URLs (Windows)'

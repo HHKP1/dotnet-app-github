@@ -60,7 +60,7 @@ steps:
   displayName: 'Update Database Schema for ${{ parameters.environmentName }}'
   inputs:
     azureSubscription: '${{ parameters.serviceConnection }}'
-    authenticationType: 'servicePrincipal'
+    authenticationType: 'sqlAuthentication'
     serverName: 'sql-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-${{ parameters.environmentName }}.database.windows.net'
     databaseName: 'sqldb-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-${{ parameters.environmentName }}'
     deployType: 'SqlTask'

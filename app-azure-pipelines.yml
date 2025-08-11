@@ -26,9 +26,15 @@ trigger:
       - '*.md'
 
 variables:
-  - group: prod-variables
+  - group: tfstate-variables
   - name: isLongLivedBranch
     value: $[ or(eq(variables['Build.SourceBranch'], 'refs/heads/develop'), eq(variables['Build.SourceBranch'], 'refs/heads/main'), startsWith(variables['Build.SourceBranch'], 'refs/heads/release/')) ]
+  - name: isDevelopBranch
+    value: $[ eq(variables['Build.SourceBranch'], 'refs/heads/develop') ]
+  - name: isReleaseBranch
+    value: $[ startsWith(variables['Build.SourceBranch'], 'refs/heads/release/') ]
+  - name: isMainBranch
+    value: $[ eq(variables['Build.SourceBranch'], 'refs/heads/main') ]
   - name: buildConfiguration
     value: 'Release'
   - name: dotNetFramework
@@ -135,7 +141,7 @@ stages:
         summaryFileLocation: '$(Common.TestResultsDirectory)/**/coverage.cobertura.xml'
       condition: always()
 
-    # Cross-platform EF migrations script generation
+    # Generate database migration script only for long-lived branches
     - task: DotNetCoreCLI@2
       displayName: 'Generate Database Migration Script'
       inputs:
@@ -156,15 +162,6 @@ stages:
         arguments: '--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)/app --no-build'
         modifyOutputPath: false
         zipAfterPublish: false
-      condition: and(succeeded(), eq(variables.isLongLivedBranch, 'true'))
-
-    - task: PowerShell@2
-      displayName: 'Verify Publish Output'
-      inputs:
-        targetType: 'inline'
-        script: |
-          Write-Host "Listing files in $(Build.ArtifactStagingDirectory)/app"
-          Get-ChildItem -Path "$(Build.ArtifactStagingDirectory)/app" -Recurse
       condition: and(succeeded(), eq(variables.isLongLivedBranch, 'true'))
 
     - task: ArchiveFiles@2
@@ -194,16 +191,106 @@ stages:
       condition: and(succeeded(), eq(variables.isLongLivedBranch, 'true'))
 
 # ==========================================
-# DEPLOY TO STAGING SLOT
+# DEV ENVIRONMENT DEPLOYMENT (from develop branch)
 # ==========================================
-- stage: Deploy_Staging
-  displayName: 'Deploy to Staging Slot'
+- stage: Deploy_DEV
+  displayName: 'Deploy to DEV'
   dependsOn: Build
-  condition: and(succeeded(), eq(variables.isLongLivedBranch, 'true'))
+  condition: and(succeeded(), eq(variables.isDevelopBranch, 'true'))
   jobs:
-  - deployment: DeployToStaging
-    displayName: 'Deploy Application to Staging Slot'
-    environment: PROD-STAGING
+  - deployment: DeployToDev
+    displayName: 'Deploy Application to DEV'
+    environment: DEV
+    pool: 
+      ${{ if eq(parameters.agentPool, 'self-hosted-pool') }}:
+        name: ${{ parameters.agentPool }}
+      ${{ else }}:
+        vmImage: ${{ parameters.agentPool }}
+    variables:
+      - group: dev-variables
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - template: templates/app-deploy-template.yml
+            parameters:
+              environmentName: 'dev'
+              serviceConnection: 'azure-subscription'
+              agentPool: ${{ parameters.agentPool }}
+              deployToSlot: false
+              performHealthCheck: true
+
+# ==========================================
+# QA ENVIRONMENT DEPLOYMENT (from release/* branches)
+# ==========================================
+- stage: Deploy_QA
+  displayName: 'Deploy to QA'
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables.isReleaseBranch, 'true'))
+  jobs:
+  - deployment: DeployToQa
+    displayName: 'Deploy Application to QA'
+    environment: QA
+    pool: 
+      ${{ if eq(parameters.agentPool, 'self-hosted-pool') }}:
+        name: ${{ parameters.agentPool }}
+      ${{ else }}:
+        vmImage: ${{ parameters.agentPool }}
+    variables:
+      - group: qa-variables
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - template: templates/app-deploy-template.yml
+            parameters:
+              environmentName: 'qa'
+              serviceConnection: 'azure-subscription'
+              agentPool: ${{ parameters.agentPool }}
+              deployToSlot: false
+              performHealthCheck: true
+
+# ==========================================
+# UAT ENVIRONMENT DEPLOYMENT (from release/* branches, requires QA approval)
+# ==========================================
+- stage: Deploy_UAT
+  displayName: 'Deploy to UAT'
+  dependsOn: Deploy_QA
+  condition: and(succeeded(), eq(variables.isReleaseBranch, 'true'))
+  jobs:
+  - deployment: DeployToUat
+    displayName: 'Deploy Application to UAT'
+    environment: UAT
+    pool: 
+      ${{ if eq(parameters.agentPool, 'self-hosted-pool') }}:
+        name: ${{ parameters.agentPool }}
+      ${{ else }}:
+        vmImage: ${{ parameters.agentPool }}
+    variables:
+      - group: uat-variables
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - template: templates/app-deploy-template.yml
+            parameters:
+              environmentName: 'uat'
+              serviceConnection: 'azure-subscription'
+              agentPool: ${{ parameters.agentPool }}
+              deployToSlot: false
+              performHealthCheck: true
+
+# ==========================================
+# PROD ENVIRONMENT - STAGING SLOT (from main branch)
+# ==========================================
+- stage: Deploy_PROD_Staging
+  displayName: 'Deploy to PROD Staging Slot'
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables.isMainBranch, 'true'))
+  jobs:
+  - deployment: DeployToProdStaging
+    displayName: 'Deploy Application to PROD Staging Slot'
+    environment: PROD
     pool: 
       ${{ if eq(parameters.agentPool, 'self-hosted-pool') }}:
         name: ${{ parameters.agentPool }}
@@ -215,101 +302,24 @@ stages:
       runOnce:
         deploy:
           steps:
-          - task: DownloadBuildArtifacts@1
-            displayName: 'Download Application Artifacts'
-            inputs:
-              artifactName: 'application'
-              downloadPath: '$(Pipeline.Workspace)'
-
-          - task: DownloadBuildArtifacts@1
-            displayName: 'Download Database Migration Artifacts'
-            inputs:
-              artifactName: 'database-migration'
-              downloadPath: '$(Pipeline.Workspace)'
-
-          - task: ExtractFiles@1
-            displayName: 'Extract Application Files'
-            inputs:
-              archiveFilePatterns: '$(Pipeline.Workspace)/application/app.$(Build.BuildNumber).zip'
-              destinationFolder: '$(Pipeline.Workspace)/extracted-app'
-              cleanDestinationFolder: true
-
-          - task: PowerShell@2
-            displayName: 'Verify Extracted Files'
-            inputs:
-              targetType: 'inline'
-              script: |
-                Write-Host "Listing files in $(Pipeline.Workspace)/extracted-app"
-                Get-ChildItem -Path "$(Pipeline.Workspace)/extracted-app" -Recurse
-            condition: succeeded()
-
-          - task: SqlAzureDacpacDeployment@1
-            displayName: 'Update Database Schema'
-            inputs:
-              azureSubscription: 'azure-subscription'
-              authenticationType: 'servicePrincipal'
-              serverName: 'sql-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod.database.windows.net'
-              databaseName: 'sqldb-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod'
-              deployType: 'SqlTask'
-              sqlFile: '$(Pipeline.Workspace)/database-migration/migration-script.sql'
-              sqlUsername: '$(SQL_SERVER_ADMINISTRATOR_LOGIN)'
-              sqlPassword: '$(SQL_SERVER_ADMINISTRATOR_PASSWORD)'
-
-          - task: AzureWebApp@1
-            displayName: 'Deploy to Staging Slot'
-            inputs:
-              azureSubscription: 'azure-subscription'
-              appName: 'app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod'
-              deployToSlotOrASE: true
-              resourceGroupName: 'rg-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod'
+          - template: templates/app-deploy-template.yml
+            parameters:
+              environmentName: 'prod'
+              serviceConnection: 'azure-subscription'
+              agentPool: ${{ parameters.agentPool }}
+              deployToSlot: true
               slotName: 'staging'
-              package: '$(Pipeline.Workspace)/extracted-app'
-              appSettings: '-ASPNETCORE_ENVIRONMENT $(ASPNETCORE_ENVIRONMENT) -Version $(Build.BuildNumber)'
-            env:
-              SYSTEM_DEBUG: true
-
-          # Cross-platform verification script
-          - task: PowerShell@2
-            displayName: 'Display Deployment URLs (Windows)'
-            inputs:
-              targetType: 'inline'
-              script: |
-                $prodUrl = "https://app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod.azurewebsites.net"
-                $stagingUrl = "https://app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod-staging.azurewebsites.net"
-                
-                Write-Host "✅ Application deployed to staging slot successfully!" -ForegroundColor Green
-                Write-Host ""
-                Write-Host "🔵 Production URL: $prodUrl" -ForegroundColor Blue
-                Write-Host "🟢 Staging URL: $stagingUrl" -ForegroundColor Green
-                Write-Host ""
-                Write-Host "📋 Next step: Review staging deployment, then proceed to slot swap" -ForegroundColor Yellow
-            condition: eq(variables['Agent.OS'], 'Windows_NT')
-
-          - task: Bash@3
-            displayName: 'Display Deployment URLs (Linux)'
-            inputs:
-              targetType: 'inline'
-              script: |
-                prodUrl="https://app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod.azurewebsites.net"
-                stagingUrl="https://app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod-staging.azurewebsites.net"
-                
-                echo "✅ Application deployed to staging slot successfully!"
-                echo ""
-                echo "🔵 Production URL: $prodUrl"
-                echo "🟢 Staging URL: $stagingUrl"
-                echo ""
-                echo "📋 Next step: Review staging deployment, then proceed to slot swap"
-            condition: eq(variables['Agent.OS'], 'Linux')
+              performHealthCheck: true
 
 # ==========================================
-# SWAP PRODUCTION SLOTS
+# PROD ENVIRONMENT - SLOT SWAP (from main branch)
 # ==========================================
-- stage: Swap_Slots
-  displayName: 'Swap Production Slots'
-  dependsOn: Deploy_Staging
-  condition: and(succeeded(), eq(variables.isLongLivedBranch, 'true'))
+- stage: Swap_PROD_Slots
+  displayName: 'Swap PROD Slots'
+  dependsOn: Deploy_PROD_Staging
+  condition: and(succeeded(), eq(variables.isMainBranch, 'true'))
   jobs:
-  - deployment: SwapSlots
+  - deployment: SwapProdSlots
     displayName: 'Swap Staging to Production'
     environment: PROD-SWAP
     pool: 
@@ -333,9 +343,8 @@ stages:
               sourceSlot: 'staging'
               targetSlot: 'production'
 
-          # Cross-platform verification
           - task: PowerShell@2
-            displayName: 'Verify Deployment and Display URLs (Windows)'
+            displayName: 'Verify Production Deployment'
             inputs:
               targetType: 'inline'
               script: |
@@ -368,33 +377,3 @@ stages:
                 Write-Host "📝 Share these URLs with your trainer:" -ForegroundColor Magenta
                 Write-Host "   Production: $prodUrl" -ForegroundColor White
                 Write-Host "   Staging: $stagingUrl" -ForegroundColor White
-            condition: eq(variables['Agent.OS'], 'Windows_NT')
-
-          - task: Bash@3
-            displayName: 'Verify Deployment and Display URLs (Linux)'
-            inputs:
-              targetType: 'inline'
-              script: |
-                prodUrl="https://app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod.azurewebsites.net"
-                stagingUrl="https://app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-prod-staging.azurewebsites.net"
-                
-                echo "🔄 Slot swap completed successfully!"
-                echo ""
-                echo "🎯 Final Deployment URLs:"
-                echo "🔵 Production URL: $prodUrl"
-                echo "🟢 Staging URL: $stagingUrl"
-                echo ""
-                
-                # Basic health check
-                echo "🔍 Performing health check on production..."
-                if curl -f -s -o /dev/null -w "%{http_code}" "$prodUrl" | grep -q "200"; then
-                    echo "✅ Production deployment verified successfully!"
-                else
-                    echo "⚠️ Production health check failed - please verify manually"
-                fi
-                
-                echo ""
-                echo "📝 Share these URLs with your trainer:"
-                echo "   Production: $prodUrl"
-                echo "   Staging: $stagingUrl"
-            condition: eq(variables['Agent.OS'], 'Linux')

@@ -1,0 +1,195 @@
+parameters:
+  - name: environmentName
+    type: string
+  - name: serviceConnection
+    type: string
+  - name: agentPool
+    type: string
+  - name: deployToSlot
+    type: boolean
+    default: false
+  - name: slotName
+    type: string
+    default: ''
+  - name: performHealthCheck
+    type: boolean
+    default: true
+
+steps:
+- task: DownloadBuildArtifacts@1
+  displayName: 'Download Application Artifacts'
+  inputs:
+    artifactName: 'application'
+    downloadPath: '$(Pipeline.Workspace)'
+
+- task: DownloadBuildArtifacts@1
+  displayName: 'Download Database Migration Artifacts'
+  inputs:
+    artifactName: 'database-migration'
+    downloadPath: '$(Pipeline.Workspace)'
+
+- task: ExtractFiles@1
+  displayName: 'Extract Application Files'
+  inputs:
+    archiveFilePatterns: '$(Pipeline.Workspace)/application/app.$(Build.BuildNumber).zip'
+    destinationFolder: '$(Pipeline.Workspace)/extracted-app'
+    cleanDestinationFolder: true
+
+- task: PowerShell@2
+  displayName: 'Verify Extracted Files'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "🔍 Verifying extracted application files..." -ForegroundColor Yellow
+      Write-Host "📁 Listing files in $(Pipeline.Workspace)/extracted-app" -ForegroundColor Cyan
+      Get-ChildItem -Path "$(Pipeline.Workspace)/extracted-app" -Recurse | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize
+      
+      # Check for required files
+      $requiredFiles = @("DotNetCoreSqlDb.dll", "web.config", "DotNetCoreSqlDb.deps.json")
+      foreach ($file in $requiredFiles) {
+        $filePath = Get-ChildItem -Path "$(Pipeline.Workspace)/extracted-app" -Name $file -Recurse
+        if ($filePath) {
+          Write-Host "✅ Found required file: $file" -ForegroundColor Green
+        } else {
+          Write-Host "⚠️ Missing file: $file" -ForegroundColor Yellow
+        }
+      }
+  condition: succeeded()
+
+- task: SqlAzureDacpacDeployment@1
+  displayName: 'Update Database Schema for ${{ parameters.environmentName }}'
+  inputs:
+    azureSubscription: '${{ parameters.serviceConnection }}'
+    authenticationType: 'servicePrincipal'
+    serverName: 'sql-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-${{ parameters.environmentName }}.database.windows.net'
+    databaseName: 'sqldb-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-${{ parameters.environmentName }}'
+    deployType: 'SqlTask'
+    sqlFile: '$(Pipeline.Workspace)/database-migration/migration-script.sql'
+    sqlUsername: '$(SQL_SERVER_ADMINISTRATOR_LOGIN)'
+    sqlPassword: '$(SQL_SERVER_ADMINISTRATOR_PASSWORD)'
+
+- task: AzureWebApp@1
+  displayName: 'Deploy to $(environmentName)'
+  inputs:
+    azureSubscription: '${{ parameters.serviceConnection }}'
+    appName: 'app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-${{ parameters.environmentName }}'
+    deployToSlotOrASE: ${{ parameters.deployToSlot }}
+    resourceGroupName: 'rg-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-${{ parameters.environmentName }}'
+    ${{ if parameters.deployToSlot }}:
+      slotName: '${{ parameters.slotName }}'
+    package: '$(Pipeline.Workspace)/extracted-app'
+    appSettings: '-ASPNETCORE_ENVIRONMENT $(ASPNETCORE_ENVIRONMENT) -Version $(Build.BuildNumber)'
+  env:
+    SYSTEM_DEBUG: true
+
+- ${{ if parameters.performHealthCheck }}:
+  - task: PowerShell@2
+    displayName: 'Health Check - ${{ parameters.environmentName }}'
+    inputs:
+      targetType: 'inline'
+      script: |
+        # Determine the correct URL based on deployment type
+        if ("${{ parameters.deployToSlot }}" -eq "True" -and "${{ parameters.slotName }}" -ne "") {
+          $appUrl = "https://app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-${{ parameters.environmentName }}-${{ parameters.slotName }}.azurewebsites.net"
+        } else {
+          $appUrl = "https://app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-${{ parameters.environmentName }}.azurewebsites.net"
+        }
+        
+        Write-Host "🔍 Performing health check for ${{ parameters.environmentName }} environment..." -ForegroundColor Yellow
+        Write-Host "🌐 Target URL: $appUrl" -ForegroundColor Cyan
+        
+        $maxAttempts = 10
+        $attempt = 1
+        $isHealthy = $false
+        
+        while ($attempt -le $maxAttempts -and -not $isHealthy) {
+          try {
+            Write-Host "🔄 Attempt $attempt of $maxAttempts..." -ForegroundColor Yellow
+            
+            $response = Invoke-WebRequest -Uri $appUrl -Method GET -TimeoutSec 30 -UseBasicParsing -ErrorAction Stop
+            
+            if ($response.StatusCode -eq 200) {
+              Write-Host "✅ Health check passed! Application is responding successfully." -ForegroundColor Green
+              Write-Host "📊 Status Code: $($response.StatusCode)" -ForegroundColor Green
+              Write-Host "📏 Response Length: $($response.Content.Length) characters" -ForegroundColor Green
+              $isHealthy = $true
+            } else {
+              Write-Host "⚠️ Unexpected status code: $($response.StatusCode)" -ForegroundColor Yellow
+            }
+          }
+          catch {
+            Write-Host "❌ Health check failed (attempt $attempt): $($_.Exception.Message)" -ForegroundColor Red
+            
+            if ($attempt -lt $maxAttempts) {
+              Write-Host "⏳ Waiting 30 seconds before retry..." -ForegroundColor Yellow
+              Start-Sleep -Seconds 30
+            }
+          }
+          
+          $attempt++
+        }
+        
+        if (-not $isHealthy) {
+          Write-Host "❌ Health check failed after $maxAttempts attempts" -ForegroundColor Red
+          Write-Host "🔧 Please manually verify the deployment using: $appUrl" -ForegroundColor Yellow
+          Write-Host "💡 The application might need more time to start up completely." -ForegroundColor Cyan
+          
+          # Don't fail the pipeline for health check failures in non-prod environments
+          if ("${{ parameters.environmentName }}" -eq "prod") {
+            exit 1
+          } else {
+            Write-Host "⚠️ Health check failure ignored for non-production environment" -ForegroundColor Yellow
+          }
+        }
+
+- task: PowerShell@2
+  displayName: 'Deployment Summary - ${{ parameters.environmentName }}'
+  inputs:
+    targetType: 'inline'
+    script: |
+      # Determine the correct URL based on deployment type
+      if ("${{ parameters.deployToSlot }}" -eq "True" -and "${{ parameters.slotName }}" -ne "") {
+        $appUrl = "https://app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-${{ parameters.environmentName }}-${{ parameters.slotName }}.azurewebsites.net"
+        $deploymentTarget = "${{ parameters.environmentName }} (${{ parameters.slotName }} slot)"
+      } else {
+        $appUrl = "https://app-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-${{ parameters.environmentName }}.azurewebsites.net"
+        $deploymentTarget = "${{ parameters.environmentName }}"
+      }
+      
+      Write-Host "📋 Deployment Summary for $deploymentTarget Environment:" -ForegroundColor Cyan
+      Write-Host "=" * 70 -ForegroundColor Gray
+      Write-Host "✅ Status: Deployment Completed Successfully" -ForegroundColor Green
+      Write-Host "🏷️  Environment: $deploymentTarget" -ForegroundColor Yellow
+      Write-Host "📦 Version: $(Build.BuildNumber)" -ForegroundColor Green
+      Write-Host "🗄️  Database: sqldb-$(RESOURCE_NAME_PREFIX)-$(LOCATION)-${{ parameters.environmentName }}" -ForegroundColor Magenta
+      Write-Host "🌐 Application URL: $appUrl" -ForegroundColor Cyan
+      Write-Host "🕒 Deployed at: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')" -ForegroundColor Gray
+      Write-Host "=" * 70 -ForegroundColor Gray
+      
+      # Environment-specific notes
+      switch ("${{ parameters.environmentName }}") {
+        "dev" {
+          Write-Host "💡 DEV Environment Notes:" -ForegroundColor Cyan
+          Write-Host "   • Deployed from develop branch" -ForegroundColor White
+          Write-Host "   • Use for active development and testing" -ForegroundColor White
+        }
+        "qa" {
+          Write-Host "💡 QA Environment Notes:" -ForegroundColor Cyan
+          Write-Host "   • Deployed from release branch" -ForegroundColor White
+          Write-Host "   • Ready for quality assurance testing" -ForegroundColor White
+        }
+        "uat" {
+          Write-Host "💡 UAT Environment Notes:" -ForegroundColor Cyan
+          Write-Host "   • Deployed from release branch" -ForegroundColor White
+          Write-Host "   • Ready for user acceptance testing" -ForegroundColor White
+        }
+        "prod" {
+          Write-Host "💡 PROD Environment Notes:" -ForegroundColor Cyan
+          Write-Host "   • Deployed from main branch" -ForegroundColor White
+          if ("${{ parameters.slotName }}" -eq "staging") {
+            Write-Host "   • Staging slot deployment - review before swapping" -ForegroundColor White
+          } else {
+            Write-Host "   • Production deployment active" -ForegroundColor White
+          }
+        }
+      }
